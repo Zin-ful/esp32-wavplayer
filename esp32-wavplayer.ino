@@ -13,8 +13,8 @@
 #define UP 16
 #define DOWN 17
 #define SELECT 18
-#define BACK 0
-#define WAKE GPIO_NUM_17
+#define BACK 4
+#define WAKE GPIO_NUM_4
 
 //sd card
 #define SCK 14
@@ -69,7 +69,6 @@ char settings_menu[ARR_SIZE][MAX_CHAR] = { //1
   "Time",
   "Check Battery",
   "Diagnostics",
-  "Back",
   ""
 };
 
@@ -81,14 +80,24 @@ int current_menu = 0;
 unsigned long start = millis();
 uint8_t current_brightness = 0x7F;
 
-
-
-void print(char *text, int x, int y, int clr) {
-  if (clr) {
-    display.clearDisplay();
-  }
+void print(const char *text, int x, int y, int clr = 0) {
+  if (clr) display.clearDisplay();
   display.setCursor(x * CHAR_W, y * CHAR_H);
   display.println(text);
+}
+
+void print(int value, int x, int y, int clr = 0) {
+  if (clr) display.clearDisplay();
+
+  display.setCursor(x * CHAR_W, y * CHAR_H);
+  display.println(value);
+}
+
+void print(float value, int x, int y, int clr = 0) {
+  if (clr) display.clearDisplay();
+
+  display.setCursor(x * CHAR_W, y * CHAR_H);
+  display.println(value);
 }
 
 void setup() {
@@ -147,6 +156,8 @@ int get_input() {
     return -1;
   } else if (digitalRead(SELECT) == HIGH) {
     return 3;
+  } else if (digitalRead(BACK) == HIGH) {
+    return 2;
   }
   return 0;
 }
@@ -255,8 +266,76 @@ void poweroff(){
 }
 
 void set_sleep(){}
-void set_time(){}
+
+void set_time(){
+  delay(200);
+  int waittime = 0;
+  int num = 0;
+  print("Timer:", 0, 0, 1);
+  print(waittime, 3, 4, 0);
+  display.display();
+  delay(200);
+  while (1) {
+    if (millis() - start >= 100) {
+        num = get_input();
+        if (num == 3) {
+          print(num, 0, 0, 1);
+          delay(2000);
+          break;
+        } else if (num != 0) {
+          waittime += num;
+          print(waittime, 3, 4, 0);
+          display.display();
+        }
+        start = millis();
+    }
+  if (waittime) {
+    while (waittime) {
+      delay(1000);
+      waittime--;
+      print(waittime, 3, 4, 0);
+      display.display();
+    }
+      while (1) {
+      display.fillScreen(WHITE);
+      display.display();
+      display.fillScreen(BLACK);
+      display.display();
+        if (millis() - start >= 1000) {
+          if (get_input()) {
+            break;
+          }
+          start = millis();
+        }
+      }      
+    } else {
+      print("Stopwatch:", 0, 0, 1);
+      float time = 0.0;
+      print(time, 3, 4, 0);
+      display.display();
+      while (1) {
+        if (millis() - start >= 100) {
+          time = get_input();
+          if (time) {
+            time = 0;
+             while (num != 3) {
+            start = millis();
+            num = get_input();
+            delay(100);
+            time += 0.1;
+            print(time, 3, 4, 1);
+            display.display();
+            }
+            return;
+          }
+        }
+      }
+    }
+  }
+}
+
 void battery_info(){}
+
 void diag() {
   print("Memory Stats:", 0 ,0 ,1);
   display.setCursor(0, adjust(2));
@@ -300,9 +379,10 @@ int add_file(const char *name) {
 }
 
 void wait() {
-  while (!get_input()) {
+  while (get_input() == 0) {
     continue;
   }
+  delay(100);
 }
 
 void ls(const char *name, int menu_type){
@@ -596,6 +676,10 @@ struct MenuCall Funcs[] = {
 };
 
 void exec(int choice) {
+  if (choice == 2) {
+    previous_menu();
+    draw_menu();
+  }
   int array_size = arrlen();
 
   if (choice && choice < 2) {
