@@ -5,6 +5,13 @@
 #include <SD.h>
 #include <FS.h>
 #include <SdFat.h>
+#include "driver/i2s.h"
+
+//pcm5102a
+#define I2S_NUM         I2S_NUM_0  // Use I2S port 0
+#define I2S_BCK_IO      26         // Bit clock pin
+#define I2S_LRCK_IO     25         // Left-right clock pin
+#define I2S_DATA_IO     22 
 
 //sleepy
 #define SLEEP_INT 60000 //ms
@@ -88,7 +95,11 @@ int current_menu = 0;
 int previous_menu = 0;
 
 unsigned long start = millis();
-uint8_t current_brightness = 0x7F;
+
+
+
+int current_brightness = 2;
+uint8_t brightness_value = 0x7F;
 
 void print(const char *text, int x, int y, int clr = 0) {
   if (clr) display.clearDisplay();
@@ -113,15 +124,14 @@ void print(float value, int x, int y, int clr = 0) {
 void setup() {
   start_sleep = millis();
   start_dsleep = millis();
-  //Serial.begin(115200);
   display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
   display.ssd1306_command(SSD1306_SETCONTRAST);
-  display.ssd1306_command(current_brightness);
+  display.ssd1306_command(brightness_value);
   display.setTextSize(1);
   display.setTextColor(WHITE);
   print("Checking SD card module..", 0, 0, 1);
   display.display();
-  delay(1000);
+  delay(500);
   spi.begin(SCK, MISO, MOSI, CS);
 
   if (!SD.begin(CS, spi, 40000000)) {
@@ -155,6 +165,27 @@ void setup() {
   display.display();
   delay(500);
   //stop before reaching to display errors
+  i2s_config_t i2s_config = {
+    .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX), //master mode, TX only
+    .sample_rate = 44100,                               //sampling rate
+    .bits_per_sample = I2S_BITS_PER_SAMPLE_24BIT,       //16-bit audio
+    .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,       //stereo format
+    .communication_format = I2S_COMM_FORMAT_I2S,        //I2S standard
+    .intr_alloc_flags = 0,                              //default interrupt allocation
+    .dma_buf_count = 8,                                 //number of DMA buffers
+    .dma_buf_len = 64                                   //size of each DMA buffer
+  };
+
+  i2s_pin_config_t pin_config = {
+    .bck_io_num = I2S_BCK_IO,
+    .ws_io_num = I2S_LRCK_IO,
+    .data_out_num = I2S_DATA_IO,
+    .data_in_num = I2S_PIN_NO_CHANGE //not used
+  };
+
+  i2s_driver_install(I2S_NUM, &i2s_config, 0, NULL);
+  i2s_set_pin(I2S_NUM, &pin_config);
+  
   draw_menu();
   pinMode(UP, INPUT_PULLDOWN);
   pinMode(DOWN, INPUT_PULLDOWN);
@@ -251,13 +282,16 @@ void set_brightness() {
   display.clearDisplay();
   display.setCursor(0, 0);
   display.println("Set Brightness");
-  display.setCursor(0, CHAR_H * 2);
+  display.setCursor((SCREEN_WIDTH / 2) - 1, CHAR_H * 5);
+  display.printf("%d", current_brightness);
+  display.setCursor(0, CHAR_H * 3);
   display.println("UP to increase");
-  display.setCursor(0, CHAR_H * 4);
+  display.setCursor(0, CHAR_H * 7);
   display.println("DOWN to decrease");
   display.display();
+  uint8_t illumination;
   while (1) {
-    if (millis() - start >= 50) {
+    if (millis() - start >= 200) {
 
       int inp = get_input();
 
@@ -266,31 +300,46 @@ void set_brightness() {
       }
 
       if (inp == 1 || inp == -1) {
-        current_brightness = byte_me(inp, current_brightness);
-
-        display.ssd1306_command(SSD1306_SETCONTRAST);
-        display.ssd1306_command(current_brightness);
+        current_brightness += inp;
+        if (current_brightness > 3) {
+          current_brightness = 3;
+        } else if (current_brightness < 0) {
+          current_brightness = 0;
+        }
         display.clearDisplay();
-        display.display();
         display.setCursor(0, 0);
         display.println("Set Brightness");
-        display.setCursor(0, CHAR_H * 2);
+        display.setCursor((SCREEN_WIDTH / 2) - 1, CHAR_H * 5);
+        display.printf("%d", current_brightness);
+        display.setCursor(0, CHAR_H * 3);
         display.println("UP to increase");
-        display.setCursor(0, CHAR_H * 4);
+        display.setCursor(0, CHAR_H * 7);
         display.println("DOWN to decrease");
         display.display();
-        
       }
 
       start = millis();
     }
   }
+  if (current_brightness == 3) {
+    brightness_value = 0xFE;
+
+  } else if (current_brightness == 2) {
+    brightness_value = 0x7E;
+  } else {
+    brightness_value = 0x01;
+  }
+  display.ssd1306_command(SSD1306_SETCONTRAST);
+  display.ssd1306_command(brightness_value);
 }
 
 void play(char *path) {
   print("Playing", 0, 0, 1);
   display.setCursor(0, adjust(1));
-  display.printf("%s", path);
+  display.printf("%s", path + strlen(current_dir) + 1);
+  display.display();
+  delay(300);
+  wait();
 }
 void start_clock(){}
 void play_random(){}
@@ -751,6 +800,7 @@ void exec(int choice) {
 
   else if (choice == 3) {
     if (current_menu == 2) {
+      delay(100);
       strcpy(current_dir, "/");
       strcat(current_dir, menus[current_menu].array[menu_index]);
       ls(current_dir, 3);
@@ -761,7 +811,12 @@ void exec(int choice) {
     } else if (current_menu == 3) {
       char full_path[256];
       strcpy(full_path, current_dir);
+      strcat(full_path, "/");
       strcat(full_path, menus[current_menu].array[menu_index]);
+      display.clearDisplay();
+      display.setCursor(0, 0);
+      display.printf("Moving %s", full_path);
+      display.display();
       menu_index = 0;
       scroll_offset = 0;
       play(full_path);
