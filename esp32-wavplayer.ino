@@ -6,6 +6,12 @@
 #include <FS.h>
 #include <SdFat.h>
 
+//sleepy
+#define SLEEP_INT 60000 //ms
+int start_sleep = millis();
+#define DSLEEP_INT 240000 //ms
+int start_dsleep = millis();
+
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
 
@@ -28,8 +34,8 @@
 
 #define ARR_SIZE 10
 #define MAX_CHAR 20 //this is the rounded result of SCREEN_WIDTH / CHAR_H. No need to have room for more than can be displayed
-#define MAX_FILES 1024
-#define MAX_DIR 128
+#define MAX_FILES 512
+#define MAX_DIR 64
 
 #define OLED_RESET -1
 #define VISIBLE_LINES (SCREEN_HEIGHT / CHAR_H)
@@ -58,6 +64,7 @@ char menu[ARR_SIZE][MAX_CHAR] = { //0
   "Clock",
   "Settings",
   "Poweroff",
+  "",
   ""
 };
 
@@ -76,7 +83,10 @@ char song_folders[MAX_DIR][MAX_CHAR] = {0}; //2
 char songs[MAX_FILES][MAX_CHAR] = {0}; //3
 char current_dir[MAX_CHAR] = {0};
 int menu_index = 0;
+
 int current_menu = 0;
+int previous_menu = 0;
+
 unsigned long start = millis();
 uint8_t current_brightness = 0x7F;
 
@@ -101,7 +111,9 @@ void print(float value, int x, int y, int clr = 0) {
 }
 
 void setup() {
-  Serial.begin(115200);
+  start_sleep = millis();
+  start_dsleep = millis();
+  //Serial.begin(115200);
   display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
   display.ssd1306_command(SSD1306_SETCONTRAST);
   display.ssd1306_command(current_brightness);
@@ -117,7 +129,7 @@ void setup() {
     print("Mount Failed", 0, 0, 1);
     display.setCursor(0, CHAR_H * 3);
     display.printf("cardType(): %u\n", cardType);
-   
+    strcpy(menu[5], "Remount Card");
     display.display();
     return;
   }
@@ -162,16 +174,28 @@ int get_input() {
   return 0;
 }
 
-void previous_menu() {
-  current_menu--;
-  if (current_menu < 0) {
-    current_menu = 0;
+void sleepy() {
+  display.clearDisplay();
+  display.display();
+  while (1) {
+    if (millis() - start >= 100) {
+      if (get_input()) {
+        break;
+      }
+    start = millis();
+    }
   }
+  draw_menu();
+}
+
+void back() {
+  current_menu = previous_menu;
   menu_index = 0;
   scroll_offset = 0;
 }
 
 void settings() {
+  previous_menu = current_menu;
   current_menu = 1;
   menu_index = 0;
   scroll_offset = 0;
@@ -180,10 +204,31 @@ void settings() {
 
 void loop() {
   if (millis() - start >= 100) {
-      exec(get_input());
-      start = millis();
+    int inp = get_input();
+    exec(inp);
+    if (inp) {
+      start_sleep = millis();
+      start_dsleep = millis();
+    }
+    start = millis();
+  } else if (millis() - start_sleep >= SLEEP_INT) {
+    sleepy();
+  } else if (millis() - start_dsleep >= DSLEEP_INT) {
+    poweroff();
   }
-  display.display();
+}
+
+void remount() {
+  if (!SD.begin(CS, spi, 40000000)) {
+    print("Mount Failed", 0, 0, 1);
+    display.display();
+    wait();
+  } else {
+    print("Card mounted.", 0, 0, 1);
+    strcpy(menu[5], "");
+    display.display();
+    wait();
+  }
 }
 
 uint8_t byte_me(int choice, uint8_t current) {
@@ -252,6 +297,7 @@ void play_random(){}
 
 void select_songs(){
   ls("/", 2);
+  previous_menu = current_menu;
   current_menu = 2;
   menu_index = 0;
   scroll_offset = 0;
@@ -657,7 +703,7 @@ struct Menus menus[] {
   {0, menu},
   {1, settings_menu},
   {2, song_folders},
-  {4, songs}
+  {3, songs}
 };
 
 struct MenuCall Funcs[] = {
@@ -665,19 +711,19 @@ struct MenuCall Funcs[] = {
   {"Song Selection", select_songs},
   {"Clock", start_clock},
   {"Settings", settings},
+  {"Remount Card", remount},
   {"Poweroff", poweroff},
   {"Brightness", set_brightness},
   {"Sleep Interval", set_sleep},
   {"Time", set_time},
   {"Check Battery", battery_info},
   {"Create Folders", format},
-  {"Diagnostics", diag},
-  {"Back", previous_menu}
+  {"Diagnostics", diag}
 };
 
 void exec(int choice) {
   if (choice == 2) {
-    previous_menu();
+    back();
     draw_menu();
   }
   int array_size = arrlen();
@@ -764,7 +810,6 @@ void draw_menu() {
     print("There is nothing within this menu!", 0, 0, 0);
     display.display();
     wait();
-    previous_menu();
     return;
   }
   for (int line = 0; line < VISIBLE_LINES; line++) {
