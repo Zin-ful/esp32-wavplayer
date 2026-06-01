@@ -4,14 +4,14 @@
 #include <Adafruit_SSD1306.h>
 #include <SD.h>
 #include <FS.h>
-#include <SdFat.h>
-#include "driver/i2s.h"
+#include "AudioTools.h"
 
 //pcm5102a
 #define I2S_NUM         I2S_NUM_0  // Use I2S port 0
 #define I2S_BCK_IO      26         // Bit clock pin
-#define I2S_LRCK_IO     25         // Left-right clock pin
-#define I2S_DATA_IO     22 
+#define I2S_LRCK_IO     27         // Left-right clock pin
+#define I2S_DATA_IO     33  
+#define VOLUME 20000 // max 32000   
 
 //sleepy
 #define SLEEP_INT 60000 //ms
@@ -51,10 +51,7 @@ int scroll_offset = 0;
 
 SPIClass spi = SPIClass(VSPI);
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
-SdFs SD_FS;
-
-//will be using magic numbers cause idk how tf else to do it
-
+//Audio audio;
 struct MenuCall {
   const char *name;
   void (*call)(void);
@@ -97,6 +94,16 @@ int previous_menu = 0;
 unsigned long start = millis();
 
 
+I2SStream i2s;
+EncodedAudioStream dec(&i2s, new WAVDecoder());
+StreamCopy *copier;
+
+AudioInfo info(44100, 2, 16);
+File current_song;
+
+long total_bytes;
+
+float recently_updated_value;
 
 int current_brightness = 2;
 uint8_t brightness_value = 0x7F;
@@ -122,8 +129,17 @@ void print(float value, int x, int y, int clr = 0) {
 }
 
 void setup() {
+  Serial.begin(115200);
   start_sleep = millis();
   start_dsleep = millis();
+
+  auto config = i2s.defaultConfig(TX_MODE);   
+  config.copyFrom(info); 
+  config.pin_bck = I2S_BCK_IO;
+  config.pin_ws = I2S_LRCK_IO;
+  config.pin_data = I2S_DATA_IO;
+  i2s.begin(config);
+  dec.begin();
   display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
   display.ssd1306_command(SSD1306_SETCONTRAST);
   display.ssd1306_command(brightness_value);
@@ -135,10 +151,7 @@ void setup() {
   spi.begin(SCK, MISO, MOSI, CS);
 
   if (!SD.begin(CS, spi, 40000000)) {
-    uint8_t cardType = SD.cardType();
     print("Mount Failed", 0, 0, 1);
-    display.setCursor(0, CHAR_H * 3);
-    display.printf("cardType(): %u\n", cardType);
     strcpy(menu[5], "Remount Card");
     display.display();
     return;
@@ -151,41 +164,7 @@ void setup() {
     delay(2000);
   }
   display.clearDisplay();
-  display.setCursor(0, 0);
-  display.println("SD Card Type: ");
-  if(cardType == CARD_MMC){
-    display.println("MMC");
-  } else if(cardType == CARD_SD){
-    display.println("SDSC");
-  } else if(cardType == CARD_SDHC){
-    display.println("SDHC");
-  } else {
-    display.println("UNKNOWN");
-  }
-  display.display();
-  delay(500);
   //stop before reaching to display errors
-  i2s_config_t i2s_config = {
-    .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX), //master mode, TX only
-    .sample_rate = 44100,                               //sampling rate
-    .bits_per_sample = I2S_BITS_PER_SAMPLE_24BIT,       //16-bit audio
-    .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,       //stereo format
-    .communication_format = I2S_COMM_FORMAT_I2S,        //I2S standard
-    .intr_alloc_flags = 0,                              //default interrupt allocation
-    .dma_buf_count = 8,                                 //number of DMA buffers
-    .dma_buf_len = 64                                   //size of each DMA buffer
-  };
-
-  i2s_pin_config_t pin_config = {
-    .bck_io_num = I2S_BCK_IO,
-    .ws_io_num = I2S_LRCK_IO,
-    .data_out_num = I2S_DATA_IO,
-    .data_in_num = I2S_PIN_NO_CHANGE //not used
-  };
-
-  i2s_driver_install(I2S_NUM, &i2s_config, 0, NULL);
-  i2s_set_pin(I2S_NUM, &pin_config);
-  
   draw_menu();
   pinMode(UP, INPUT_PULLDOWN);
   pinMode(DOWN, INPUT_PULLDOWN);
@@ -233,19 +212,36 @@ void settings() {
   
 }
 
+void update_time() {
+  if (current_song.available()) {
+    display.setCursor(0, SCREEN_HEIGHT - CHAR_H);
+    display.setTextColor(BLACK);
+    display.printf("%.2f", recently_updated_value);
+    recently_updated_value = ((float)current_song.position() / (float)total_bytes) * 100.0f;
+    display.setTextColor(WHITE);
+    display.printf("%.2f", recently_updated_value);
+    display.display();
+  } else {
+    if (recently_updated_value) {
+      recently_updated_value = 0.0f;
+    }
+  }
+}
+
 void loop() {
   if (millis() - start >= 100) {
     int inp = get_input();
     exec(inp);
-    if (inp) {
-      start_sleep = millis();
-      start_dsleep = millis();
-    }
     start = millis();
   } else if (millis() - start_sleep >= SLEEP_INT) {
     sleepy();
   } else if (millis() - start_dsleep >= DSLEEP_INT) {
     poweroff();
+  } else if (millis() - start_sleep >= 5000) {
+   update_time();
+  }
+  if (current_song.available()) {
+    copier->copy();
   }
 }
 
@@ -260,20 +256,6 @@ void remount() {
     display.display();
     wait();
   }
-}
-
-uint8_t byte_me(int choice, uint8_t current) {
-  const uint8_t min = 0x00;
-  const uint8_t max = 0xFF;
-
-  if (choice == 1) {
-    if (current < max) current++;
-  } 
-  else if (choice == -1) {
-    if (current > min + 100) current--;
-  }
-
-  return current;
 }
 
 void set_brightness() {
@@ -334,13 +316,18 @@ void set_brightness() {
 }
 
 void play(char *path) {
-  print("Playing", 0, 0, 1);
-  display.setCursor(0, adjust(1));
-  display.printf("%s", path + strlen(current_dir) + 1);
-  display.display();
-  delay(300);
-  wait();
+  current_song = SD.open(path);
+  if (!current_song) {
+    print("Open failed", 0, 0, 1);
+    display.display();
+    wait();
+    return;
+  }
+  total_bytes = current_song.size();
+
+  copier = new StreamCopy(dec, current_song);
 }
+
 void start_clock(){}
 void play_random(){}
 
@@ -360,7 +347,9 @@ void poweroff(){
   esp_deep_sleep_start();
 }
 
-void set_sleep(){}
+void set_sleep(){
+  
+}
 
 void set_time(){
   delay(200);
@@ -519,115 +508,8 @@ void format(){
   print("Otherwise, poweroff", 0, 4, 0);
   print("Press to cont.", 0, 6, 0);
   display.display();
+  delay(200);
   wait();
-  display.clearDisplay();
-  delay(300);
-  print("THIS WILL ATTEMPT", 0, 0, 1);
-  print("TO REMOVE ALL", 0, 1, 0);
-  print("FOLDERS", 0, 2, 0);
-  print("ENSURE THIS IS", 0, 3, 0);
-  print("INTENDED.", 0, 4, 0);
-  print("Otherwise, poweroff", 0, 5, 0);
-  print("Press to cont.", 0, 6, 0);
-  display.display();
-  wait();
-  display.clearDisplay();
-
-  if (!SD_FS.cardBegin(SdSpiConfig(CS, SHARED_SPI))) {
-    uint8_t errCode = SD_FS.sdErrorCode();
-    uint8_t errData = SD_FS.sdErrorData();
-
-    switch (SD_FS.sdErrorCode()) {
-    case SD_CARD_ERROR_CMD0:
-        print("No card / wiring", 0, 0, 0);
-        return;
-
-    case SD_CARD_ERROR_CMD8:
-        print("Card rejected CMD8", 0, 0, 0);
-        return;
-
-    case SD_CARD_ERROR_ACMD41:
-        print("Init timeout", 0, 0, 0);
-        return;
-
-    default:
-        print("Unknown SD error", 0, 0, 0);
-        return;
-    }
-    display.display();
-    delay(1500);
-    display.clearDisplay();
-    return;
-  } else {
-    print("Card has been", 0, 0, 0);
-    print("initialized", 0, 1,0);
-    display.display();
-    delay(1500);
-    display.clearDisplay();
-  }
-  if (!SD_FS.format()) {
-    uint8_t code = SD_FS.sdErrorCode();
-    uint8_t data = SD_FS.sdErrorData();
-    print("Format failed.", 0, 0, 1);
-    switch (SD_FS.sdErrorCode()) {
-      case SD_CARD_ERROR_CMD0:
-          print("No card / bad wiring", 0, 1, 0);
-          return;
-
-      case SD_CARD_ERROR_CMD8:
-          print("CMD8 failed", 0, 1, 0);
-          return;
-
-      case SD_CARD_ERROR_ACMD41:
-          print("Card init timeout", 0, 1, 0);
-          return;
-
-      case SD_CARD_ERROR_CMD17:
-          print("Read block failed", 0, 1, 0);
-          return;
-
-      case SD_CARD_ERROR_CMD24:
-          print("Write block failed", 0, 1, 0);
-          return;
-
-      default:
-          print("Unknown SD error", 0, 1, 0);
-          return;
-      }
-    
-    display.display();
-    delay(1500);
-    display.clearDisplay();
-    return;
-  } else {
-    print("Card has been", 0, 0, 1);
-    print("formatted", 0, 1, 0);
-    display.display();
-    delay(1500);
-    display.clearDisplay();
-  }
-
-  if (!SD_FS.volumeBegin()) {
-    print("Card mount failed.", 0, 0, 1);
-    print("Please restart device", 0, 1, 0);
-    print("and reformat on a PC.", 0, 2, 0);
-    display.display();
-    delay(1500);
-    display.clearDisplay();
-    return;
-  } else {
-    print("Card has been", 0, 0, 1);
-    print("remounted.", 0, 1, 0);
-    display.display();
-    delay(1500);
-    display.clearDisplay();
-  }
-
-  print("Removed all folders", 0, 0, 1);
-  display.display();
-  delay(500);
-  display.clearDisplay();
-
 
   if (SD.mkdir("/Rock")) {
     print("Created:", 0, 0, 0);
@@ -771,6 +653,9 @@ struct MenuCall Funcs[] = {
 };
 
 void exec(int choice) {
+  if (!choice) {
+    return;
+  }
   if (choice == 2) {
     back();
     draw_menu();
@@ -835,6 +720,9 @@ void exec(int choice) {
       }
     }
   }
+  start_sleep = millis();
+  start_dsleep = millis();
+  update_time();
 }
 
 int arrlen() {
