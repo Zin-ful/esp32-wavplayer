@@ -6,23 +6,20 @@
 #include <FS.h>
 #include "AudioTools.h"
 
-//pcm5102a
-#define I2S_NUM         I2S_NUM_0  // Use I2S port 0
-#define I2S_BCK_IO      26         // Bit clock pin
-#define I2S_LRCK_IO     27         // Left-right clock pin
-#define I2S_DATA_IO     33  
-#define VOLUME 20000 // max 32000   
-
 //sleepy
 #define SLEEP_INT 60000 //ms
 int start_sleep = millis();
-#define DSLEEP_INT 240000 //ms
+#define DSLEEP_INT 120000 //ms
 int start_dsleep = millis();
+unsigned long start = millis();
 
-#define SCREEN_WIDTH 128
-#define SCREEN_HEIGHT 64
+//pcm5102a
+#define I2S_NUM         I2S_NUM_0  // Use I2S port 0
+#define I2S_BCK_IO      26         // Bit clock pin
+#define I2S_LRCK_IO     32         // Left-right clock pin
+#define I2S_DATA_IO     33  
 
-//please remember to change these for your personal configuration if you device to change any of this
+//please remember to change these for your personal configuration if you decide to change any of this
 #define UP 16
 #define DOWN 17
 #define SELECT 18
@@ -35,23 +32,45 @@ int start_dsleep = millis();
 #define MOSI 13
 #define CS 5 
 
+//font
 #define CHAR_SIZE 1
 #define CHAR_W (6 * CHAR_SIZE)
 #define CHAR_H (8 * CHAR_SIZE)
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
 
-#define ARR_SIZE 10
-#define MAX_CHAR 20 //this is the rounded result of SCREEN_WIDTH / CHAR_H. No need to have room for more than can be displayed
-#define MAX_FILES 512
-#define MAX_DIR 64
+#define ARR_SIZE 10 //menu max size
+#define MAX_CHAR 19 //max amount of chars that can fit on the screen -1 for song progress bar
+#define MAX_FILES 512 //files to be listed in folder
+#define MAX_DIR 64 //max listed folders
 
 #define OLED_RESET -1
 #define VISIBLE_LINES (SCREEN_HEIGHT / CHAR_H)
 
 int scroll_offset = 0;
 
+char song_folders[MAX_DIR][MAX_CHAR] = {0}; //2
+char songs[MAX_FILES][MAX_CHAR] = {0}; //3
+char current_dir[MAX_CHAR] = {0};
+char playing[MAX_CHAR] = {0};
+int menu_index = 0;
+int current_menu = 0;
+int previous_menu = 0;
+
+I2SStream i2s;
+EncodedAudioStream dec(&i2s, new WAVDecoder());
+StreamCopy *copier;
+AudioInfo info(44100, 2, 16);
+File current_song;
+
+long total_bytes;
+float recently_updated_value;
+
+int current_brightness = 2;
+uint8_t brightness_value = 0x7F;
+
 SPIClass spi = SPIClass(VSPI);
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
-//Audio audio;
 struct MenuCall {
   const char *name;
   void (*call)(void);
@@ -63,9 +82,9 @@ struct Menus {
 };
 
 char menu[ARR_SIZE][MAX_CHAR] = { //0
+  "Current Song",
   "Play Random",
   "Song Selection",
-  "Clock",
   "Settings",
   "Poweroff",
   "",
@@ -77,36 +96,14 @@ char settings_menu[ARR_SIZE][MAX_CHAR] = { //1
   "Brightness",
   "Create Folders",
   "Sleep Interval",
-  "Time",
   "Check Battery",
   "Diagnostics",
+  "Unmount Card",
   ""
 };
 
-char song_folders[MAX_DIR][MAX_CHAR] = {0}; //2
-char songs[MAX_FILES][MAX_CHAR] = {0}; //3
-char current_dir[MAX_CHAR] = {0};
-int menu_index = 0;
-
-int current_menu = 0;
-int previous_menu = 0;
-
-unsigned long start = millis();
-
-
-I2SStream i2s;
-EncodedAudioStream dec(&i2s, new WAVDecoder());
-StreamCopy *copier;
-
-AudioInfo info(44100, 2, 16);
-File current_song;
-
-long total_bytes;
-
-float recently_updated_value;
-
-int current_brightness = 2;
-uint8_t brightness_value = 0x7F;
+//control
+int pause_song = 0;
 
 void print(const char *text, int x, int y, int clr = 0) {
   if (clr) display.clearDisplay();
@@ -127,6 +124,10 @@ void print(float value, int x, int y, int clr = 0) {
   display.setCursor(x * CHAR_W, y * CHAR_H);
   display.println(value);
 }
+
+/*
+MAIN
+*/
 
 void setup() {
   Serial.begin(115200);
@@ -171,6 +172,24 @@ void setup() {
   pinMode(SELECT, INPUT_PULLDOWN);
 }
 
+void loop() {
+  if (millis() - start >= 100) {
+    int inp = get_input();
+    exec(inp);
+    start = millis();
+  } else if (millis() - start_sleep >= SLEEP_INT) {
+    sleepy();
+  } else if (millis() - start_dsleep >= DSLEEP_INT && !current_song) {
+    poweroff();
+  }
+  push_song();
+}
+
+/*
+END OF MAIN
+*/
+
+//input related
 int get_input() {
   if (digitalRead(UP) == HIGH) {
     return 1;
@@ -184,6 +203,120 @@ int get_input() {
   return 0;
 }
 
+void back() {
+  if (current_menu == previous_menu) {
+    current_menu = 0;
+    previous_menu = 0;
+  } else {
+    current_menu = previous_menu;
+  }
+  menu_index = 0;
+  scroll_offset = 0;
+}
+
+void wait() {
+  while (get_input() == 0) {
+    push_song();
+  }
+  delay_noblock(100);
+}
+
+void delay_noblock(int wait) {
+  unsigned long delayed = millis();
+  while (millis() - delayed < wait) {
+    push_song();
+  }
+}
+//song related
+void draw_progress() {
+  delay_noblock(200);
+  int width = ((uint64_t)current_song.position() * SCREEN_WIDTH) / total_bytes;
+  display.fillRect(0, SCREEN_HEIGHT - 4, SCREEN_WIDTH, 4, BLACK);
+  display.fillRect(0, SCREEN_HEIGHT - 4, width, 4, WHITE);
+  display.display();
+}
+
+void check_song() {
+  if (!current_song.available()) {
+    strcpy(playing, "None");
+    print(playing, 0, 0, 1);
+    display.display();
+    wait();
+    return;
+  }
+  print(playing, 0, 0, 1);
+  display.display();
+  int choice = 0;
+  while (choice != 2) {
+    if (millis() - start >= 100) {
+      choice = get_input();
+      start = millis();
+      if (choice == 3) {
+        pause_song = !pause_song;
+      }
+    }
+    draw_progress();
+    push_song();
+  }
+}
+
+void push_song() {
+  if (current_song.available() && !pause_song) {
+    copier->copy();
+    if (current_song.position() >= total_bytes) {
+      stop_song();
+    }
+  }
+}
+
+void play(char *path) {
+  if (current_song || copier) {
+    stop_song();
+  }
+  current_song = SD.open(path);
+  if (!current_song) {
+    print("Open failed", 0, 0, 1);
+    display.display();
+    wait();
+    return;
+  }
+  total_bytes = current_song.size();
+
+  copier = new StreamCopy(dec, current_song);
+  copier->begin();
+  pause_song = 0;
+  delay(100);
+}
+
+void play_random() {
+
+}
+
+void stop_song() {
+  pause_song = 0;
+    if (copier) {
+        delete copier;
+        copier = nullptr;
+    }
+    if (current_song) {
+        current_song.flush();
+        current_song.close();
+    }
+}
+
+void select_songs(){
+  ls("/", 2);
+  previous_menu = current_menu;
+  current_menu = 2;
+  menu_index = 0;
+  scroll_offset = 0;
+  draw_menu();
+}
+// Utility
+void draw_pause() {
+
+}
+
 void sleepy() {
   display.clearDisplay();
   display.display();
@@ -194,22 +327,9 @@ void sleepy() {
       }
     start = millis();
     }
+    push_song();
   }
   draw_menu();
-}
-
-void back() {
-  current_menu = previous_menu;
-  menu_index = 0;
-  scroll_offset = 0;
-}
-
-void settings() {
-  previous_menu = current_menu;
-  current_menu = 1;
-  menu_index = 0;
-  scroll_offset = 0;
-  
 }
 
 void update_time() {
@@ -228,21 +348,16 @@ void update_time() {
   }
 }
 
-void loop() {
-  if (millis() - start >= 100) {
-    int inp = get_input();
-    exec(inp);
-    start = millis();
-  } else if (millis() - start_sleep >= SLEEP_INT) {
-    sleepy();
-  } else if (millis() - start_dsleep >= DSLEEP_INT) {
-    poweroff();
-  } else if (millis() - start_sleep >= 5000) {
-   update_time();
-  }
-  if (current_song.available()) {
-    copier->copy();
-  }
+void umount() {
+  stop_song();
+  delay(100);
+  memset(songs, 0, sizeof(songs));
+  memset(song_folders, 0, sizeof(song_folders));
+  strcpy(menu[5], "Remount Card");
+  SD.end();
+  print("Card unmounted", 0, 0, 1);
+  display.display();
+  wait();
 }
 
 void remount() {
@@ -258,8 +373,29 @@ void remount() {
   }
 }
 
+void poweroff(){
+  esp_sleep_enable_ext0_wakeup(WAKE, 1);
+  display.clearDisplay();
+  display.display();
+  esp_deep_sleep_start();
+}
+
+int adjust(int pos) {
+  return pos * CHAR_H;
+}
+
+
+//user set settings
+void settings() {
+  previous_menu = current_menu;
+  current_menu = 1;
+  menu_index = 0;
+  scroll_offset = 0;
+  
+}
+
 void set_brightness() {
-  delay(100);
+  delay_noblock(100);
 
   display.clearDisplay();
   display.setCursor(0, 0);
@@ -315,109 +451,11 @@ void set_brightness() {
   display.ssd1306_command(brightness_value);
 }
 
-void play(char *path) {
-  current_song = SD.open(path);
-  if (!current_song) {
-    print("Open failed", 0, 0, 1);
-    display.display();
-    wait();
-    return;
-  }
-  total_bytes = current_song.size();
-
-  copier = new StreamCopy(dec, current_song);
-}
-
-void start_clock(){}
-void play_random(){}
-
-void select_songs(){
-  ls("/", 2);
-  previous_menu = current_menu;
-  current_menu = 2;
-  menu_index = 0;
-  scroll_offset = 0;
-  draw_menu();
-}
-
-void poweroff(){
-  esp_sleep_enable_ext0_wakeup(WAKE, 1);
-  display.clearDisplay();
-  display.display();
-  esp_deep_sleep_start();
-}
-
 void set_sleep(){
-  
+
 }
 
-void set_time(){
-  delay(200);
-  int waittime = 0;
-  int num = 0;
-  print("Timer:", 0, 0, 1);
-  print(waittime, 3, 4, 0);
-  display.display();
-  delay(200);
-  while (1) {
-    if (millis() - start >= 100) {
-        num = get_input();
-        if (num == 3) {
-          print(num, 0, 0, 1);
-          delay(2000);
-          break;
-        } else if (num != 0) {
-          waittime += num;
-          print(waittime, 3, 4, 0);
-          display.display();
-        }
-        start = millis();
-    }
-  if (waittime) {
-    while (waittime) {
-      delay(1000);
-      waittime--;
-      print(waittime, 3, 4, 0);
-      display.display();
-    }
-      while (1) {
-      display.fillScreen(WHITE);
-      display.display();
-      display.fillScreen(BLACK);
-      display.display();
-        if (millis() - start >= 1000) {
-          if (get_input()) {
-            break;
-          }
-          start = millis();
-        }
-      }      
-    } else {
-      print("Stopwatch:", 0, 0, 1);
-      float time = 0.0;
-      print(time, 3, 4, 0);
-      display.display();
-      while (1) {
-        if (millis() - start >= 100) {
-          time = get_input();
-          if (time) {
-            time = 0;
-             while (num != 3) {
-            start = millis();
-            num = get_input();
-            delay(100);
-            time += 0.1;
-            print(time, 3, 4, 1);
-            display.display();
-            }
-            return;
-          }
-        }
-      }
-    }
-  }
-}
-
+//system info
 void battery_info(){}
 
 void diag() {
@@ -429,12 +467,18 @@ void diag() {
   display.setCursor(0, adjust(5));
   display.printf("Aval:%dkb", (ESP.getMaxAllocHeap() / 1024));
   display.display();
-  delay(1000);
+  delay_noblock(1000);
   wait();
 }
+
+//SD card management
 int add_folder(const char *name) {
   int i = 0;
-  for (i; song_folders[i][0] != '\0' && i <= MAX_DIR; i++);
+  for (i; song_folders[i][0] != '\0' && i < MAX_DIR; i++) {
+    if (!strcmp(name, song_folders[i])) {
+      return 0;
+    }
+  }
   if (i > MAX_DIR) {
     display.clearDisplay();
     print("Maximum directories reached.", 0, 0, 0);
@@ -449,7 +493,11 @@ int add_folder(const char *name) {
 
 int add_file(const char *name) {
   int i = 0;
-  for (i; songs[i][0] != '\0' && i <= MAX_FILES; i++);
+  for (i; songs[i][0] != '\0' && i < MAX_FILES; i++){
+    if (!strcmp(name, songs[i])) {
+      return 0;
+    }
+  }
   if (i > MAX_FILES) {
     display.clearDisplay();
     print("Maximum files reached.", 0, 0, 0);
@@ -460,13 +508,6 @@ int add_file(const char *name) {
   }
   strcpy(songs[i], name);
   return 1;
-}
-
-void wait() {
-  while (get_input() == 0) {
-    continue;
-  }
-  delay(100);
 }
 
 void ls(const char *name, int menu_type){
@@ -496,10 +537,6 @@ void ls(const char *name, int menu_type){
   }
 }
 
-int adjust(int pos) {
-  return pos * CHAR_H;
-}
-
 void format(){
   print("Defaulting folders", 0, 0, 1);
   print("please make sure you", 0, 1, 0);
@@ -508,128 +545,129 @@ void format(){
   print("Otherwise, poweroff", 0, 4, 0);
   print("Press to cont.", 0, 6, 0);
   display.display();
-  delay(200);
+  delay_noblock(200);
   wait();
 
   if (SD.mkdir("/Rock")) {
     print("Created:", 0, 0, 0);
     print("Rock",0,1, 0);
     display.display();
-    delay(500);
+    delay_noblock(500);
     display.clearDisplay();
   } else {
     print("Failed to make:", 0, 0, 0);
     print("Rock",0,1, 0);
     display.display();
-    delay(500);
+    delay_noblock(500);
     display.clearDisplay();
   }
   if (SD.mkdir("/Country")) {
     print("Created:", 0, 0, 0);
     print("Country",0,1, 0);
     display.display();
-    delay(500);
+    delay_noblock(500);
     display.clearDisplay();
   } else {
     print("Failed to make:", 0, 0, 0);
     print("Country",0,1, 0);
     display.display();
-    delay(500);
+    delay_noblock(500);
     display.clearDisplay();
   }
   if (SD.mkdir("/HipHop")) {
     print("Created:", 0, 0, 0);
     print("Hip Hop",0,1, 0);
     display.display();
-    delay(500);
+    delay_noblock(500);
     display.clearDisplay();
   } else {
     print("Failed to make:", 0, 0, 0);
     print("Hip Hop",0,1, 0);
     display.display();
-    delay(500);
+    delay_noblock(500);
     display.clearDisplay();
   }
   if (SD.mkdir("/Lo-Fi")) {
     print("Created:", 0, 0, 0);
     print("Lo-Fi",0,1, 0);
     display.display();
-    delay(500);
+    delay_noblock(500);
     display.clearDisplay();
   } else {
     print("Failed to make:", 0, 0, 0);
     print("Lo-Fi",0,1, 0);
     display.display();
-    delay(500);
+    delay_noblock(500);
     display.clearDisplay();
   }
   if (SD.mkdir("/RnB")) {
     print("Created:", 0, 0, 0);
     print("RnB",0,1, 0);
     display.display();
-    delay(500);
+    delay_noblock(500);
     display.clearDisplay();
   } else {
     print("Failed to make:", 0, 0, 0);
     print("RnB",0,1, 0);
     display.display();
-    delay(500);
+    delay_noblock(500);
     display.clearDisplay();
   }
   if (SD.mkdir("/Pop")) {
     print("Created:", 0, 0, 0);
     print("Pop",0,1, 0);
     display.display();
-    delay(500);
+    delay_noblock(500);
     display.clearDisplay();
   } else {
     print("Failed to make:", 0, 0, 0);
     print("Pop",0,1, 0);
     display.display();
-    delay(500);
+    delay_noblock(500);
     display.clearDisplay();
   }
   if (SD.mkdir("/Classical")) {
     print("Created:", 0, 0, 0);
     print("Classical",0,1, 0);
     display.display();
-    delay(500);
+    delay_noblock(500);
     display.clearDisplay();
   } else {
     print("Failed to make:", 0, 0, 0);
     print("Classical",0,1, 0);
     display.display();
-    delay(500);
+    delay_noblock(500);
     display.clearDisplay();
   }
   if (SD.mkdir("/Misc")) {
     print("Created:", 0, 0, 0);
     print("Misc",0,1, 0);
     display.display();
-    delay(500);
+    delay_noblock(500);
     display.clearDisplay();
   } else {
     print("Failed to make:", 0, 0, 0);
     print("Misc",0,1, 0);
     display.display();
-    delay(500);
+    delay_noblock(500);
     display.clearDisplay();
   }
   if (SD.mkdir("/Audio Books")) {
     print("Created:", 0, 0, 0);
     print("Audio Books",0,1, 0);
     display.display();
-    delay(500);
+    delay_noblock(500);
     display.clearDisplay();
   } else {
     print("Failed to make:", 0, 0, 0);
     print("Audio Books",0,1, 0);
     display.display();
-    delay(500);
+    delay_noblock(500);
     display.clearDisplay();
   }
 }
 
+//menu assignments
 struct Menus menus[] {
   {0, menu},
   {1, settings_menu},
@@ -638,20 +676,21 @@ struct Menus menus[] {
 };
 
 struct MenuCall Funcs[] = {
+  {"Current Song", check_song},
   {"Play Random", play_random},
   {"Song Selection", select_songs},
-  {"Clock", start_clock},
   {"Settings", settings},
   {"Remount Card", remount},
+  {"Unmount Card", umount},
   {"Poweroff", poweroff},
   {"Brightness", set_brightness},
   {"Sleep Interval", set_sleep},
-  {"Time", set_time},
   {"Check Battery", battery_info},
   {"Create Folders", format},
   {"Diagnostics", diag}
 };
 
+//calls other functions
 void exec(int choice) {
   if (!choice) {
     return;
@@ -685,10 +724,11 @@ void exec(int choice) {
 
   else if (choice == 3) {
     if (current_menu == 2) {
-      delay(100);
       strcpy(current_dir, "/");
       strcat(current_dir, menus[current_menu].array[menu_index]);
+      memset(songs, 0, sizeof(songs));
       ls(current_dir, 3);
+      previous_menu = current_menu;
       current_menu = 3;
       menu_index = 0;
       scroll_offset = 0;
@@ -698,6 +738,7 @@ void exec(int choice) {
       strcpy(full_path, current_dir);
       strcat(full_path, "/");
       strcat(full_path, menus[current_menu].array[menu_index]);
+      strcpy(playing, menus[current_menu].array[menu_index]);
       display.clearDisplay();
       display.setCursor(0, 0);
       display.printf("Moving %s", full_path);
@@ -709,12 +750,12 @@ void exec(int choice) {
       for (int i = 0; i < 12; i++) {
         if (strcmp(Funcs[i].name,
                   menus[current_menu].array[menu_index]) == 0) {
-          delay(250);
+          delay_noblock(250);
           Funcs[i].call();
 
           scroll_offset = 0;
           draw_menu();
-          delay(250);
+          delay_noblock(250);
           break;
         }
       }
@@ -722,13 +763,7 @@ void exec(int choice) {
   }
   start_sleep = millis();
   start_dsleep = millis();
-  update_time();
-}
-
-int arrlen() {
-  int i = 0;
-  for (i; menus[current_menu].array[i][0] != '\0'; i++);
-  return i;
+  //update_time();
 }
 
 void update(int direction) {
@@ -744,6 +779,12 @@ void update(int direction) {
   display.println(menus[current_menu].array[menu_index]);
 
   display.display();
+}
+
+int arrlen() {
+  int i = 0;
+  for (i; menus[current_menu].array[i][0] != '\0'; i++);
+  return i;
 }
 
 void draw_menu() {
