@@ -165,6 +165,7 @@ void setup() {
     delay(2000);
   }
   display.clearDisplay();
+  ls("/", 2);
   //stop before reaching to display errors
   draw_menu();
   pinMode(UP, INPUT_PULLDOWN);
@@ -228,12 +229,15 @@ void delay_noblock(int wait) {
   }
 }
 //song related
-void draw_progress() {
-  delay_noblock(200);
+int draw_progress(int old_width) {
   int width = ((uint64_t)current_song.position() * SCREEN_WIDTH) / total_bytes;
+  if (width <= old_width) {
+    return old_width;
+  }
   display.fillRect(0, SCREEN_HEIGHT - 4, SCREEN_WIDTH, 4, BLACK);
   display.fillRect(0, SCREEN_HEIGHT - 4, width, 4, WHITE);
   display.display();
+  return width;
 }
 
 void check_song() {
@@ -247,17 +251,24 @@ void check_song() {
   print(playing, 0, 0, 1);
   display.display();
   int choice = 0;
+  int current_width = 0;
   while (choice != 2) {
     if (millis() - start >= 100) {
       choice = get_input();
-      start = millis();
       if (choice == 3) {
         pause_song = !pause_song;
       }
+      start = millis();
+      if (!current_song) {
+        check_song();
+        return;
+      }
     }
-    draw_progress();
+    current_width = draw_progress(current_width);
     push_song();
   }
+  start_sleep = millis();
+  start_dsleep = millis();
 }
 
 void push_song() {
@@ -304,8 +315,7 @@ void stop_song() {
     }
 }
 
-void select_songs(){
-  ls("/", 2);
+void select_songs() {
   previous_menu = current_menu;
   current_menu = 2;
   menu_index = 0;
@@ -369,6 +379,7 @@ void remount() {
     print("Card mounted.", 0, 0, 1);
     strcpy(menu[5], "");
     display.display();
+    ls("/", 2);
     wait();
   }
 }
@@ -695,6 +706,8 @@ void exec(int choice) {
   if (!choice) {
     return;
   }
+  start_sleep = millis();
+  start_dsleep = millis();
   if (choice == 2) {
     back();
     draw_menu();
@@ -741,11 +754,11 @@ void exec(int choice) {
       strcpy(playing, menus[current_menu].array[menu_index]);
       display.clearDisplay();
       display.setCursor(0, 0);
-      display.printf("Moving %s", full_path);
       display.display();
-      menu_index = 0;
-      scroll_offset = 0;
       play(full_path);
+      check_song();
+      draw_menu();
+      delay_noblock(250);
     } else {
       for (int i = 0; i < 12; i++) {
         if (strcmp(Funcs[i].name,
@@ -761,8 +774,6 @@ void exec(int choice) {
       }
     }
   }
-  start_sleep = millis();
-  start_dsleep = millis();
   //update_time();
 }
 
