@@ -250,13 +250,17 @@ void check_song() {
   }
   print(playing, 0, 0, 1);
   display.display();
+  if (pause_song) {
+    draw_pause();
+  }
   int choice = 0;
   int current_width = 0;
   while (choice != 2) {
-    if (millis() - start >= 100) {
+    if (millis() - start >= 150) {
       choice = get_input();
       if (choice == 3) {
         pause_song = !pause_song;
+        draw_pause();
       }
       start = millis();
       if (!current_song) {
@@ -299,10 +303,6 @@ void play(char *path) {
   delay(100);
 }
 
-void play_random() {
-
-}
-
 void stop_song() {
   pause_song = 0;
     if (copier) {
@@ -324,7 +324,23 @@ void select_songs() {
 }
 // Utility
 void draw_pause() {
+  const int bar_w = 8;
+  const int bar_h = SCREEN_HEIGHT / 3;
 
+  const int x = SCREEN_WIDTH / 2;
+  const int y = (SCREEN_HEIGHT - bar_h) / 2;
+
+  const int gap = 4;
+
+  int x1 = x - bar_w - (gap / 2);
+  int x2 = x + (gap / 2);
+
+  uint16_t color = pause_song ? WHITE : BLACK;
+
+  display.fillRect(x1, y, bar_w, bar_h, color);
+  display.fillRect(x2, y, bar_w, bar_h, color);
+
+  display.display();
 }
 
 void sleepy() {
@@ -701,7 +717,32 @@ struct MenuCall Funcs[] = {
   {"Diagnostics", diag}
 };
 
-//calls other functions
+//calls other above functions
+void play_random() {
+  int randint;
+  current_menu = 3;
+  while (!arrlen()) {
+    randint = random(0, MAX_DIR);
+    Serial.println(randint);
+    strcpy(current_dir, "/");
+    strcat(current_dir, menus[2].array[randint]);
+    memset(songs, 0, sizeof(songs));
+    ls(current_dir, 3);
+  }
+  char full_path[256];
+  randint = random(0, arrlen());
+  Serial.println(randint);
+  strcpy(full_path, current_dir);
+  strcat(full_path, "/");
+  strcat(full_path, menus[current_menu].array[randint]);
+  strcpy(playing, menus[current_menu].array[randint]);
+  play(full_path);
+  check_song();
+  current_menu = 0;
+  draw_menu();
+  delay_noblock(250);
+}
+
 void exec(int choice) {
   if (!choice) {
     return;
@@ -719,8 +760,7 @@ void exec(int choice) {
 
     if (menu_index < 0) {
       menu_index = 0;
-    }
-    else if (menu_index >= array_size) {
+    } else if (menu_index >= array_size) {
       menu_index = array_size - 1;
     }
 
@@ -733,9 +773,7 @@ void exec(int choice) {
     }
 
     draw_menu();
-  }
-
-  else if (choice == 3) {
+  } else if (choice == 3) {
     if (current_menu == 2) {
       strcpy(current_dir, "/");
       strcat(current_dir, menus[current_menu].array[menu_index]);
@@ -808,21 +846,15 @@ void draw_menu() {
     return;
   }
   for (int line = 0; line < VISIBLE_LINES; line++) {
-
     int item = scroll_offset + line;
-
     if (item >= array_size)
       break;
-
     display.setCursor(0, line * CHAR_H);
-
     if (item == menu_index)
       display.print(">");
     else
       display.print(" ");
-
     display.println(menus[current_menu].array[item]);
   }
-
   display.display();
 }
