@@ -6,6 +6,13 @@
 #include <FS.h>
 #include "AudioTools.h"
 
+/*
+This is for specifically the ESP32-WROOM-32D (wide) and is for testing only.
+
+Unless specified otherwise all of the constants can be changed in terms of pin assignments.
+Just make sure to know the attributes of the pin you changing to, as some are different that others in terms of how boot is handled 
+*/
+
 //sleepy
 #define SLEEP_INT 60000 //ms
 int start_sleep = millis();
@@ -20,12 +27,18 @@ unsigned long start = millis();
 #define I2S_DATA_IO     33  
 
 //please remember to change these for your personal configuration if you decide to change any of this
-#define UP 16
-#define DOWN 17
-#define SELECT 18
-#define BACK 4
-#define WAKE GPIO_NUM_4
+//#define UP 16
+//#define DOWN 17
+//#define SELECT 18
+//#define BACK 4
 
+#define UP 2675
+#define DOWN 4010
+#define SELECT 3350
+#define BACK 9999 //disable
+#define WAKE GPIO_NUM_34 //idk if this will work
+#define BUTTONS 34 //analog pin, needs to be of 1_ 
+#define SENSITIVITY 50 //the range pos and neg that is allowable via the analog pin
 //sd card
 #define SCK 14
 #define MISO 19 //if customizing, do NOT use pin 12. A basic SD module pulls it high preventing boot. Horseshit.
@@ -131,6 +144,7 @@ MAIN
 
 void setup() {
   Serial.begin(115200);
+  analogReadResolution(12);
   start_sleep = millis();
   start_dsleep = millis();
 
@@ -151,7 +165,7 @@ void setup() {
   delay(500);
   spi.begin(SCK, MISO, MOSI, CS);
 
-  if (!SD.begin(CS, spi, 40000000)) {
+  if (!SD.begin(CS, spi, 1000000)) {
     print("Mount Failed", 0, 0, 1);
     strcpy(menu[5], "Remount Card");
     display.display();
@@ -179,9 +193,7 @@ void loop() {
     exec(inp);
     start = millis();
   } else if (millis() - start_sleep >= SLEEP_INT) {
-    sleepy();
-  } else if (millis() - start_dsleep >= DSLEEP_INT && !current_song) {
-    poweroff();
+    sleepy(1);
   }
   push_song();
 }
@@ -191,7 +203,7 @@ END OF MAIN
 */
 
 //input related
-int get_input() {
+/*int get_input() {
   if (digitalRead(UP) == HIGH) {
     return 1;
   } else if (digitalRead(DOWN) == HIGH) {
@@ -199,6 +211,20 @@ int get_input() {
   } else if (digitalRead(SELECT) == HIGH) {
     return 3;
   } else if (digitalRead(BACK) == HIGH) {
+    return 2;
+  }
+  return 0;
+}*/
+
+int get_input() {
+  int value = analogRead(BUTTONS);
+  if (value > UP - SENSITIVITY && value < UP + SENSITIVITY) {
+    return 1;
+  } else if (value > DOWN - SENSITIVITY && value < DOWN + SENSITIVITY) {
+    return -1;
+  } else if (value > SELECT - SENSITIVITY && value < SELECT + SENSITIVITY) {
+    return 3;
+  } else if (value > BACK - SENSITIVITY && value < BACK + SENSITIVITY) {
     return 2;
   }
   return 0;
@@ -246,6 +272,7 @@ void check_song() {
     print(playing, 0, 0, 1);
     display.display();
     wait();
+    start_sleep = millis();
     return;
   }
   print(playing, 0, 0, 1);
@@ -258,20 +285,29 @@ void check_song() {
   while (choice != 2) {
     if (millis() - start >= 150) {
       choice = get_input();
-      if (choice == 3) {
-        pause_song = !pause_song;
-        draw_pause();
+      if (choice) {
+        if (choice == 3) {
+          pause_song = !pause_song;
+          draw_pause();
+        }
+        start_sleep = millis();
       }
       start = millis();
       if (!current_song) {
         check_song();
         return;
       }
+    } else if (millis() - start_sleep >= SLEEP_INT) {
+      sleepy(0);
+      print(playing, 0, 0, 1);
+      if (pause_song) {
+        draw_pause();
+      }
+      display.display();
     }
     current_width = draw_progress(current_width);
     push_song();
   }
-  start_sleep = millis();
   start_dsleep = millis();
 }
 
@@ -343,19 +379,24 @@ void draw_pause() {
   display.display();
 }
 
-void sleepy() {
+void sleepy(int full_sleep) {
+  start_dsleep = millis();
   display.clearDisplay();
   display.display();
   while (1) {
-    if (millis() - start >= 100) {
+    if (millis() - start >= 500) {
       if (get_input()) {
         break;
       }
     start = millis();
+    } else if (millis() - start_dsleep >= DSLEEP_INT && full_sleep) {
+      poweroff();
     }
     push_song();
   }
-  draw_menu();
+  if (full_sleep) {
+    draw_menu();
+  }
 }
 
 void update_time() {
@@ -385,21 +426,27 @@ void umount() {
   display.display();
   wait();
 }
-
 void remount() {
-  if (!SD.begin(CS, spi, 40000000)) {
+  Serial.println("[SD] Attempting remount...");
+
+  SD.end();
+  delay(100);
+
+  pinMode(CS, OUTPUT);
+  digitalWrite(CS, HIGH);
+
+  if (!SD.begin(CS, spi, 1000000)) {
+    Serial.println("[SD] Mount failed");
+    Serial.printf("[SD] CS pin: %d\n", CS);
+
     print("Mount Failed", 0, 0, 1);
     display.display();
     wait();
-  } else {
-    print("Card mounted.", 0, 0, 1);
-    strcpy(menu[5], "");
-    display.display();
-    ls("/", 2);
-    wait();
+    return;
   }
-}
 
+  Serial.println("[SD] Mount successful");
+}
 void poweroff(){
   esp_sleep_enable_ext0_wakeup(WAKE, 1);
   display.clearDisplay();
@@ -748,7 +795,6 @@ void exec(int choice) {
     return;
   }
   start_sleep = millis();
-  start_dsleep = millis();
   if (choice == 2) {
     back();
     draw_menu();
